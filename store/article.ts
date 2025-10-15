@@ -1,9 +1,9 @@
-import type {AppMsgEx, PublishInfo, PublishListItem} from "~/types/types";
-import {openDatabase} from "~/store/db";
-import {updateInfoCache} from "~/store/info";
-
-
-const activeAccount = useActiveAccount()
+import {openDatabase} from "~/store/db";  
+import type {AppMsgEx, PublishListItem, PublishInfo} from "~/types/types";  
+import {updateInfoCache} from "~/store/info";  
+  
+// 修改这里 - 正确获取 account  
+const {account: activeAccount} = useActiveAccount()  
 
 async function updateArticle(articleStore: IDBObjectStore, article: AppMsgEx, fakeid: string): Promise<IDBValidKey> {
     const key = `${fakeid}:${article.aid}`
@@ -38,45 +38,63 @@ function getAllKeys(store: IDBObjectStore): Promise<IDBValidKey[]> {
  * @param completed 是否已全部加载
  * @param fakeid 公众号id
  */
-export async function updateArticleCache(publishList: PublishListItem[], completed: boolean, fakeid: string) {
-    const db = await openDatabase()
-    const tx = db.transaction(['article', 'info'], 'readwrite')
-
-    const articleStore = tx.objectStore('article')
-    const infoStore = tx.objectStore('info')
-
-    // 存储前所有的key
-    const keys = await getAllKeys(articleStore)
-
-    let msgCount = 0
-    let articleCount = 0
-
-    for (const item of publishList) {
-        const publish_info: PublishInfo = JSON.parse(item.publish_info)
-        let newEntryCount = 0
-
-        for (const article of publish_info.appmsgex) {
-            const key = await updateArticle(articleStore, article, fakeid)
-            if (!keys.includes(key)) {
-                newEntryCount++
-                articleCount++
-            }
-        }
-
-        if (newEntryCount > 0) {
-            // 新增成功
-            msgCount++
-        }
-    }
-
-    await updateInfoCache(infoStore, {
-        fakeid: fakeid,
-        completed: completed,
-        count: msgCount,
-        articles: articleCount,
-        nickname: activeAccount.value?.nickname,
-        round_head_img: activeAccount.value?.type === 'author' ? undefined : activeAccount.value?.round_head_img,
-    })
+export async function updateArticleCache(publishList: PublishListItem[], isCompleted: boolean, fakeid: string) {  
+    const db = await openDatabase()  
+    const transaction = db.transaction(['article', 'info'], 'readwrite')  
+    const articleStore = transaction.objectStore('article')  
+    const infoStore = transaction.objectStore('info')  
+  
+    // 获取所有已存在的文章键  
+    const existingKeys = new Set<string>()  
+    const keysRequest = articleStore.getAllKeys()  
+    await new Promise((resolve) => {  
+        keysRequest.onsuccess = () => {  
+            keysRequest.result.forEach(key => {  
+                if (typeof key === 'string' && key.startsWith(`${fakeid}:`)) {  
+                    existingKeys.add(key)  
+                }  
+            })  
+            resolve(true)  
+        }  
+    })  
+  
+    let newMessageCount = 0  
+    let newArticleCount = 0  
+  
+    for (const item of publishList) {  
+        const publish_info: PublishInfo = JSON.parse(item.publish_info)  
+        for (const article of publish_info.appmsgex) {  
+            const key = `${fakeid}:${article.aid}`  
+              
+            // 只有当文章不存在时才计数  
+            if (!existingKeys.has(key)) {  
+                if (article.itemidx === 1) {  
+                    newMessageCount++  
+                }  
+                newArticleCount++  
+            }  
+              
+            await new Promise((resolve, reject) => {  
+                const request = articleStore.put({...article, fakeid}, key)  
+                request.onsuccess = () => resolve(true)  
+                request.onerror = reject  
+            })  
+        }  
+    }  
+  
+    const activeAccount = useActiveAccount()  
+      
+    // 只传入新增的计数  
+    await updateInfoCache(infoStore, {  
+        fakeid,  
+        completed: isCompleted,  
+        count: newMessageCount,  // 只传入新增的数量  
+        articles: newArticleCount,  // 只传入新增的数量  
+        nickname: activeAccount.value?.nickname,  
+        round_head_img: activeAccount.value?.round_head_img,  
+    })  
+  
+    return true  
 }
 
 /**

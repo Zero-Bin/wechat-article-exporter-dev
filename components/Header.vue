@@ -144,15 +144,35 @@ async function loadData() {
  * 选择公众号
  * @param account
  */
-function selectAccount(account: AccountInfo | AuthorInfo) {
-  isOpen.value = false
-  activeAccount.value = account
-
-  nextTick(() => {
-    emit('select:account', account)
-  })
+import { saveAs } from 'file-saver'  
+  
+function selectAccount(account: AccountInfo | AuthorInfo) {  
+  isOpen.value = false  
+  activeAccount.value = account  // 自动触发云端同步  
+    
+  // 可选:选择的公众号保存为 JSON 文件  
+  /*
+  try {  
+    const accountData = {  
+      fakeid: account.fakeid,  
+      nickname: account.nickname,  
+      round_head_img: account.round_head_img,  
+      type: account.type,  
+    }  
+      
+    const blob = new Blob([JSON.stringify(accountData, null, 2)], {   
+      type: 'application/json'   
+    })  
+    saveAs(blob, `${account.nickname || account.fakeid}_info.json`)  
+  } catch (e) {  
+    console.error('保存 JSON 失败:', e)  
+  }  
+  */
+  
+  nextTick(() => {  
+    emit('select:account', account)  
+  })  
 }
-
 
 const articleQuery = ref('')
 

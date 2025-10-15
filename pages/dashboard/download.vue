@@ -15,7 +15,15 @@
             <span v-if="accountInfo.nickname" class="text-xl font-medium">{{ accountInfo.nickname }}</span>
           </p>
           <p>ID: <span class="font-mono">{{ accountInfo.fakeid }}</span></p>
-          <UBadge variant="subtle" color="green" class="absolute top-4 right-2">{{ accountInfo.articles }}</UBadge>
+          <UBadge   
+            @click.stop="toggleSelectedAccount(accountInfo, true)" 
+            variant="subtle"   
+            color="green"   
+            class="absolute top-4 right-2 cursor-pointer hover:bg-green-100"  
+            :class="{'opacity-50': refreshingAccount === accountInfo.fakeid}"  
+          >  
+            {{ refreshingAccount === accountInfo.fakeid ? '刷新中...' : accountInfo.articles }}  
+          </UBadge>  
         </li>
       </ul>
 
@@ -149,7 +157,179 @@ import {type Duration, format, isSameDay, sub} from 'date-fns'
 import {useBatchDownload} from "~/composables/useBatchDownload";
 import ExcelJS from "exceljs";
 import {saveAs} from 'file-saver'
-
+import { getArticleList } from '~/apis'  
+  
+// 添加刷新状态  
+const refreshingAccount = ref('')  
+const loginAccount = useLoginAccount()  
+const toast = useToast()  
+  
+// 添加刷新最新文章的函数  
+async function refreshArticles(info: Info) {  
+  if (refreshingAccount.value) return  
+    
+  refreshingAccount.value = info.fakeid  
+  const fakeid = info.fakeid  
+    
+  try {  
+    console.log('开始刷新文章, fakeid:', fakeid)  
+  
+    // 1. 从云端获取该公众号的配置,检查上次刷新时间  
+    const accountConfig = await $fetch(`/api/account/single?fakeid=${fakeid}`)  
+    const now = Math.floor(Date.now() / 1000)  
+    const lastRefreshTime = accountConfig?.lastRefreshTime || 0  
+    const timeSinceLastRefresh = now - lastRefreshTime  
+  
+    console.log('上次刷新时间:', lastRefreshTime, '距今:', timeSinceLastRefresh, '秒')  
+  
+    let shouldRefreshFromWechat = false  
+    let startTime = 0  
+  
+    // 2. 判断是否需要从微信接口刷新 (超过5分钟)  
+    if (timeSinceLastRefresh > 300) {  
+      shouldRefreshFromWechat = true  
+      // 计算起始时间: 上次拉取时间往前一天，或首次拉取一个月  
+      if (lastRefreshTime > 0) {  
+        startTime = lastRefreshTime - 86400 // 往前一天  
+      } else {  
+        const oneMonthAgo = sub(new Date(), { months: 1 })  
+        startTime = Math.floor(oneMonthAgo.getTime() / 1000)  
+      }  
+      console.log('需要从微信接口刷新, 起始时间:', new Date(startTime * 1000))  
+    }  
+  
+    if (shouldRefreshFromWechat) {  
+      // 3. 从微信接口拉取新数据  
+      const allArticles: AppMsgEx[] = []  
+      let begin = 0  
+      let completed = false  
+      while (!completed) {  
+        const [fetchedArticles, isCompleted] = await getArticleList(fakeid, loginAccount.value.token, begin)  
+        const recentArticles = fetchedArticles.filter(article => article.update_time >= startTime)  
+        allArticles.push(...recentArticles)  
+        const oldestArticle = fetchedArticles[fetchedArticles.length - 1]  
+        if (oldestArticle && oldestArticle.update_time < startTime) {  
+          completed = true  
+        } else {  
+          completed = isCompleted  
+        }  
+        if (!completed) {  
+          begin += fetchedArticles.filter(article => article.itemidx === 1).length  
+        }  
+      }  
+      console.log('从微信接口获取到', allArticles.length, '篇文章')  
+  
+      // 4. 同步到云端(去重)  
+      if (allArticles.length > 0) {  
+        await $fetch(`/api/articles/${fakeid}`, {  
+          method: 'POST',  
+          body: { articles: allArticles.map(article => ({ ...article, fakeid })) }  
+        })  
+        console.log('已同步到云端')  
+      }  
+  
+      // 5. 更新该公众号的拉取时间  
+      await $fetch('/api/account/single', {  
+        method: 'POST',  
+        body: { fakeid, lastRefreshTime: now }  
+      })  
+      console.log('已更新拉取时间')  
+    }  
+  
+    // 6. 从云端加载完整数据  
+    const serverArticles: AppMsgEx[] = await $fetch(`/api/articles/${fakeid}?limit=10000`) || []  
+    console.log('从云端加载了', serverArticles.length, '篇文章')  
+  
+    if (serverArticles.length > 0) {  
+      // 获取本地已有的文章ID  
+      const localArticles = await getArticleCache(fakeid, Date.now())  
+      const localArticleIds = new Set<string>()  
+      localArticles.forEach(article => localArticleIds.add(article.aid))  
+  
+      // 筛选出云端有但本地没有的文章  
+      const articlesToPut = serverArticles.filter(article => !localArticleIds.has(article.aid))  
+      console.log('将新增到本地', articlesToPut.length, '篇文章')  
+  
+      // 更新 IndexedDB  
+      const accountInfo = cachedAccountInfos.find(info => info.fakeid === fakeid)  
+      const needsInfoUpdate = accountInfo && accountInfo.articles !== serverArticles.length  
+  
+      if (articlesToPut.length > 0 || needsInfoUpdate) {  
+        const db = await openDatabase()  
+        await new Promise<void>((resolve, reject) => {  
+          const transaction = db.transaction(['article', 'info'], 'readwrite')  
+          const articleStore = transaction.objectStore('article')  
+          const infoStore = transaction.objectStore('info')  
+  
+          transaction.oncomplete = () => {  
+            console.log('IndexedDB transaction completed successfully.')  
+            resolve()  
+          }  
+          transaction.onerror = (event) => {  
+            console.error('IndexedDB transaction error:', (event.target as IDBRequest).error)  
+            reject((event.target as IDBRequest).error)  
+          }  
+  
+          // 批量写入新文章  
+          articlesToPut.forEach(article => {  
+            const key = `${fakeid}:${article.aid}`  
+            articleStore.put({ ...article, fakeid }, key)  
+          })  
+  
+          // 更新公众号信息  
+          if (needsInfoUpdate && accountInfo) {  
+            const newInfo = {  
+              ...accountInfo,  
+              articles: serverArticles.length  
+            }  
+            infoStore.put(newInfo)  
+          }  
+        })  
+      }  
+  
+      // 如果当前选中的是这个公众号,更新显示  
+      if (selectedAccount.value === fakeid) {  
+        articles.length = 0  
+        deletedArticlesCount.value = serverArticles.filter(article => article.is_deleted).length  
+        const sortedServerArticles = serverArticles.filter(article => !article.is_deleted)  
+          .sort((a, b) => b.update_time - a.update_time)  
+  
+        articles.push(...sortedServerArticles.map(article => ({  
+          ...article,  
+          checked: false,  
+          display: true,  
+          author_name: article.author_name || '--',  
+        })))  
+  
+        if (articles.length > 0) {  
+          query.dateRange = {  
+            start: new Date(articles[articles.length - 1].update_time * 1000),  
+            end: new Date(articles[0].update_time * 1000),  
+          }  
+        }  
+      }  
+  
+      toast.add({
+        title: '刷新成功',
+        description: shouldRefreshFromWechat 
+          ? `[${selectedAccountName.value}]: 从微信接口刷新并加载了 ${serverArticles.length} 篇文章` 
+          : `[${selectedAccountName.value}]: 从云端缓存加载了 ${serverArticles.length} 篇文章`,
+        color: 'green',
+        timeout: 5000 // 显示5秒
+      })
+    }  
+  
+  } catch (e: any) {  
+    console.error('刷新文章失败:', e)  
+    toast.add({  
+      title: '刷新失败',  
+      description: e.message || '无法刷新文章数据',  
+      color: 'red'  
+    })  
+  } finally {  
+    refreshingAccount.value = ''  
+  }  
+}
 
 interface Article extends AppMsgEx {
   checked: boolean
@@ -159,6 +339,9 @@ interface Article extends AppMsgEx {
 useHead({
   title: '数据导出 | 微信公众号文章导出'
 })
+
+// 添加这行  
+const activeAccount = useActiveAccount()  
 
 // 已缓存的公众号信息
 const cachedAccountInfos = await getAllInfo()
@@ -172,13 +355,28 @@ const sortedAccountInfos = computed(() => {
 const selectedAccount = ref('')
 const selectedAccountName = ref('')
 
-async function toggleSelectedAccount(info: Info) {
-  if (info.fakeid !== selectedAccount.value) {
-    selectedAccount.value = info.fakeid
-    selectedAccountName.value = info.nickname || info.fakeid
-    switchTableData(info.fakeid).catch(() => {
-    })
-  }
+// 添加 onMounted 钩子  
+onMounted(async () => {  
+  if (activeAccount.value?.fakeid) {  
+    const fakeid = activeAccount.value.fakeid  
+    const accountInfo = cachedAccountInfos.find(info => info.fakeid === fakeid)  
+      
+    if (accountInfo) {  
+      selectedAccount.value = fakeid  
+      selectedAccountName.value = accountInfo.nickname || fakeid  
+      await switchTableData(fakeid)  
+    }  
+  }  
+})  
+
+async function toggleSelectedAccount(info: Info, forceRefresh = false) {
+  // 核心逻辑改变：无论是切换还是强制刷新，都执行后续操作
+  selectedAccount.value = info.fakeid
+  selectedAccountName.value = info.nickname || info.fakeid
+  // 将 forceRefresh 标志传递给 switchTableData
+  switchTableData(info.fakeid, forceRefresh).catch((e) => {
+    console.error("切换或刷新账号失败:", e)
+  })
 }
 
 const articles = reactive<Article[]>([])
@@ -195,31 +393,220 @@ const selectedArticles = computed(() => {
 })
 const deletedArticlesCount = ref(0)
 
-async function switchTableData(fakeid: string) {
+import { updateInfoCache } from '~/store/info'  
+import { openDatabase } from '~/store/db'  
+import { sub } from 'date-fns'  
+  
+async function switchTableData(fakeid: string, forceRefresh = false) {
   checkAll.value = false
   isIndeterminate.value = false
-
   loading.value = true
   articles.length = 0
-  const data = await getArticleCache(fakeid, Date.now())
-  deletedArticlesCount.value = data.filter(article => article.is_deleted).length
-  articles.push(...data.filter(article => !article.is_deleted).map(article => ({
-    ...article,
-    checked: false,
-    display: true,
-    author_name: article.author_name || '--',
-  })))
-  await sleep(500)
-  loading.value = false
+  deletedArticlesCount.value = 0 // 重置删除计数
 
-  query.title = ''
-  query.authors = []
-  query.isOriginal = '所有'
-  query.dateRange = {
-    start: new Date(articles[articles.length - 1].update_time * 1000),
-    end: new Date(),
+  try {
+    console.log('开始加载文章, fakeid:', fakeid)
+
+    // 1. 从云端获取该公众号的配置,检查上次刷新时间
+    const accountConfig = await $fetch(`/api/account/single?fakeid=${fakeid}`)
+    const now = Math.floor(Date.now() / 1000)
+    const lastRefreshTime = accountConfig?.lastRefreshTime || 0
+    const timeSinceLastRefresh = now - lastRefreshTime
+
+    console.log('上次刷新时间:', lastRefreshTime, '距今:', timeSinceLastRefresh, '秒')
+
+    let shouldRefreshFromWechat = false
+    let startTime = 0
+
+    // 2. 判断是否需要从微信接口刷新 (超过5分钟)
+    if (forceRefresh || timeSinceLastRefresh > 300) {
+      shouldRefreshFromWechat = true
+      if (forceRefresh) {
+          console.log('触发了强制刷新!')
+      }
+      shouldRefreshFromWechat = true
+      // 计算起始时间: 上次拉取时间往前一天，或首次拉取一个月
+      if (lastRefreshTime > 0) {
+        startTime = lastRefreshTime - 86400 // 往前一天
+      } else {
+        const oneMonthAgo = sub(new Date(), { months: 1 })
+        startTime = Math.floor(oneMonthAgo.getTime() / 1000)
+      }
+      console.log('需要从微信接口刷新, 起始时间:', new Date(startTime * 1000))
+    }
+
+    if (shouldRefreshFromWechat) {
+      // 3. 从微信接口拉取新数据
+      const allArticles: AppMsgEx[] = []
+      let begin = 0
+      let completed = false
+      while (!completed) {
+        const [fetchedArticles, isCompleted] = await getArticleList(fakeid, loginAccount.value.token, begin)
+        const recentArticles = fetchedArticles.filter(article => article.update_time >= startTime)
+        allArticles.push(...recentArticles)
+        const oldestArticle = fetchedArticles[fetchedArticles.length - 1]
+        if (oldestArticle && oldestArticle.update_time < startTime) {
+          completed = true
+        } else {
+          completed = isCompleted
+        }
+        if (!completed) {
+          begin += fetchedArticles.filter(article => article.itemidx === 1).length
+        }
+      }
+      console.log('从微信接口获取到', allArticles.length, '篇文章')
+
+      // 4. 同步到云端(去重)
+      if (allArticles.length > 0) {
+        await $fetch(`/api/articles/${fakeid}`, {
+          method: 'POST',
+          body: { articles: allArticles.map(article => ({ ...article, fakeid })) }
+        })
+        console.log('已同步到云端')
+      }
+
+      // 5. 更新该公众号的拉取时间
+      await $fetch('/api/account/single', {
+        method: 'POST',
+        body: { fakeid, lastRefreshTime: now }
+      })
+      console.log('已更新拉取时间')
+    }
+
+    // 6. 从云端加载完整数据
+    const serverArticles: AppMsgEx[] = await $fetch(`/api/articles/${fakeid}?limit=10000`) || []
+    console.log('从云端加载了', serverArticles.length, '篇文章')
+
+    if (serverArticles.length > 0) {
+      // ==================== 核心修改：数据库操作部分 ====================
+
+      // 首先，在所有事务之外，获取本地已有的文章ID
+      const localArticles = await getArticleCache(fakeid, Date.now())
+      const localArticleIds = new Set<string>()
+      localArticles.forEach(article => localArticleIds.add(article.aid))
+
+      // 筛选出云端有但本地没有的文章
+      const articlesToPut = serverArticles.filter(article => !localArticleIds.has(article.aid))
+      console.log('将新增到本地', articlesToPut.length, '篇文章')
+
+      // 只有在需要写入新文章或更新公众号信息时，才启动事务
+      const accountInfo = cachedAccountInfos.find(info => info.fakeid === fakeid)
+      const needsInfoUpdate = accountInfo && accountInfo.articles !== serverArticles.length
+
+      if (articlesToPut.length > 0 || needsInfoUpdate) {
+        const db = await openDatabase()
+        // 将所有数据库写入操作封装在一个单独的Promise中，以确保事务的原子性
+        await new Promise<void>((resolve, reject) => {
+          const transaction = db.transaction(['article', 'info'], 'readwrite')
+          const articleStore = transaction.objectStore('article')
+          const infoStore = transaction.objectStore('info')
+
+          transaction.oncomplete = () => {
+            console.log('IndexedDB transaction completed successfully.')
+            resolve()
+          }
+          transaction.onerror = (event) => {
+            console.error('IndexedDB transaction error:', (event.target as IDBRequest).error)
+            reject((event.target as IDBRequest).error)
+          }
+
+          // 批量写入新文章 (不再使用await)
+          articlesToPut.forEach(article => {
+            const key = `${fakeid}:${article.aid}`
+            articleStore.put({ ...article, fakeid }, key)
+          })
+
+          // 更新公众号信息 (不再使用await)
+          if (needsInfoUpdate && accountInfo) {
+            const newInfo = {
+              ...accountInfo,
+              articles: serverArticles.length // 直接设置为云端的总数
+            }
+            infoStore.put(newInfo)
+
+            // --- 关键新增：同步更新前端UI的数据源 ---
+            const index = cachedAccountInfos.findIndex(info => info.fakeid === fakeid)
+            if (index !== -1) {
+              cachedAccountInfos[index].articles = serverArticles.length
+            }
+            // --- 结束新增 ---
+          }
+        })
+      }
+      
+      // =================================================================
+
+      // 9. 显示文章列表
+      deletedArticlesCount.value = serverArticles.filter(article => article.is_deleted).length
+      // 在 push 之前，先对文章按 update_time 进行降序排序
+      const sortedServerArticles = serverArticles.filter(article => !article.is_deleted)
+        .sort((a, b) => b.update_time - a.update_time);
+
+      articles.push(...sortedServerArticles.map(article => ({
+        ...article,
+        checked: false,
+        display: true,
+        author_name: article.author_name || '--',
+      })))
+
+      // 10. 更新日期范围
+      if (articles.length > 0) {
+        // articles 数组已经被降序排序，所以第一个元素是最新的，最后一个是最旧的
+        query.dateRange = {
+          start: new Date(articles[articles.length - 1].update_time * 1000), // <-- 取最后一个
+          end: new Date(articles[0].update_time * 1000), // <-- 取第一个作为结束日期，更精确
+        }
+      }
+
+      toast.add({
+        title: '加载成功',
+        description: shouldRefreshFromWechat 
+          ? `[${selectedAccountName.value}]: 从微信接口刷新并加载了 ${serverArticles.length} 篇文章` 
+          : `[${selectedAccountName.value}]: 从云端缓存加载了 ${serverArticles.length} 篇文章`,
+        color: 'green',
+        timeout: 5000 // 显示5秒
+      })
+
+    } else {
+      console.log('云端无数据, 尝试从本地加载')
+      // 降级到本地 IndexedDB
+      const data = await getArticleCache(fakeid, Date.now())
+      deletedArticlesCount.value = data.filter(article => article.is_deleted).length
+      // 在 push 之前，也对本地数据进行降序排序
+      const sortedLocalArticles = data.filter(article => !article.is_deleted)
+        .sort((a, b) => b.update_time - a.update_time);
+
+      articles.push(...sortedLocalArticles.map(article => ({
+        ...article,
+        checked: false,
+        display: true,
+        author_name: article.author_name || '--',
+      })))
+      toast.add({
+        title: '加载成功',
+        description: `[${selectedAccountName.value}]: 从浏览器本地缓存加载了 ${articles.length} 篇文章`,
+        color: 'blue',
+        timeout: 5000 // 显示5秒
+      })
+    }
+
+  } catch (e: any) {
+    console.error('加载文章失败:', e)
+    toast.add({
+      title: '加载文章失败',
+      description: e.message || '无法加载文章数据',
+      color: 'red'
+    })
+  } finally {
+    loading.value = false
+    // 重置筛选条件
+    query.title = ''
+    query.authors = []
+    query.isOriginal = '所有'
+    query.albums = []
   }
 }
+
 
 function maxLen(text: string, max = 35): string {
   if (text.length > max) {

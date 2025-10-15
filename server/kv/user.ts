@@ -19,7 +19,7 @@ export async function createUser(user: UserEntry): Promise<boolean> {
     // https://github.com/denoland/denokv/issues/45
     // https://github.com/wechat-article/wechat-article-exporter/issues/12
     if (process.dev) {
-        return Promise.resolve(true)
+        // return Promise.resolve(true)
     }
 
     const primaryKey = ["users", user.originalID]
@@ -68,7 +68,7 @@ export async function getUser(originalID: string): Promise<UserEntry | null> {
     // https://github.com/denoland/denokv/issues/45
     // https://github.com/wechat-article/wechat-article-exporter/issues/12
     if (process.dev) {
-        return null
+        // return null
     }
 
     const kv = await useKv()

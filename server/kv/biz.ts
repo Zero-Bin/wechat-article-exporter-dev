@@ -15,7 +15,7 @@ export async function getBizEntry(fakeid: string): Promise<BizEntry | null> {
     // https://github.com/denoland/denokv/issues/45
     // https://github.com/wechat-article/wechat-article-exporter/issues/12
     if (process.dev) {
-        return null
+        // return null
     }
 
     const kv = await useKv()
