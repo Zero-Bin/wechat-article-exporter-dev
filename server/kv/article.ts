@@ -1,38 +1,47 @@
-import {useKv} from "~/server/utils/kv";  
-import type {AppMsgEx} from "~/types/types";  
-  
-export interface ArticleEntry extends AppMsgEx {  
-  fakeid: string  
-}  
-  
-/**  
- * 保存文章到服务端(批量)  
- */  
-export async function saveArticles(fakeid: string, articles: ArticleEntry[]): Promise<boolean> {  
-  const kv = await useKv()  
-    
-  // 去重:使用 Map 确保每个 aid 只保存一次  
-  const uniqueArticles = new Map<string, ArticleEntry>()  
-  for (const article of articles) {  
-    uniqueArticles.set(article.aid, article)  
-  }  
-    
-  const batchSize = 50  
-  const articleArray = Array.from(uniqueArticles.values())  
-    
-  for (let i = 0; i < articleArray.length; i += batchSize) {  
-    const batch = articleArray.slice(i, i + batchSize)  
-    const operations = batch.map(article => {  
-      const key = ["articles", fakeid, article.aid]  
-      return kv.set(key, article)  
-    })  
-    await Promise.all(operations)  
-  }  
-    
-  return true  
+import {useKv} from "~/server/utils/kv";
+import type {AppMsgEx} from "~/types/types";
+import {processArticleContent} from '~/server/utils/content';
+
+export interface ArticleEntry extends AppMsgEx {
+  fakeid: string
 }
-  
-/**  
+
+/**
+ * 保存文章到服务端(批量)
+ */
+export async function saveArticles(fakeid: string, articles: ArticleEntry[]): Promise<boolean> {
+  const kv = await useKv()
+
+  // 去重:使用 Map 确保每个 aid 只保存一次
+  const uniqueArticles = new Map<string, ArticleEntry>()
+  for (const article of articles) {
+    uniqueArticles.set(article.aid, article)
+  }
+
+  const articleArray = Array.from(uniqueArticles.values())
+
+  // 处理文章内容，提取关键词和场景
+  for (const article of articleArray) {
+    if (!article.scenes && !article.keywords && article.link) {
+      const {scenes, keywords} = await processArticleContent(article.link);
+      article.scenes = scenes;
+      article.keywords = keywords;
+    }
+  }
+
+  const batchSize = 50
+
+  for (let i = 0; i < articleArray.length; i += batchSize) {
+    const batch = articleArray.slice(i, i + batchSize)
+    const operations = batch.map(article => {
+      const key = ["articles", fakeid, article.aid]
+      return kv.set(key, article)
+    })
+    await Promise.all(operations)
+  }
+
+  return true
+}/**  
  * 获取公众号的文章列表  
  */  
 export async function getArticles(fakeid: string, limit: number = 1000): Promise<ArticleEntry[]> {  
