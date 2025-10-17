@@ -72,12 +72,30 @@ async function loadData() {
   try {
     const fakeid = activeAccount.value?.fakeid!
     const [articles, completed, totalCount] = await getArticleList(fakeid, loginAccount.value.token, begin.value, keyword.value)
+    
+    // 获取文章内容并识别场景和关键词
+    for (const article of articles) {
+      try {
+        const response = await $fetch('/api/article-content', {
+          method: 'POST',
+          body: {
+            url: article.link
+          }
+        })
+        article.scenes = response.scenes
+        article.keywords = response.keywords
+      } catch (e) {
+        console.warn(`Failed to process article ${article.link}:`, e)
+        article.scenes = []
+        article.keywords = []
+      }
+    }
+    
     articleList.push(...articles)
     noMoreData.value = completed
     const count = articles.filter(article => article.itemidx === 1).length
     begin.value += count
 
-    totalPages.value = Math.ceil(totalCount / ARTICLE_LIST_PAGE_SIZE)
 
 
     // 加载可用的缓存
@@ -104,6 +122,24 @@ async function loadData() {
  */
 async function loadArticlesFromCache(fakeid: string, create_time: number) {
   const articles = await getArticleCache(fakeid, create_time)
+  
+  // 获取文章内容并识别场景和关键词
+  for (const article of articles) {
+    try {
+      const response = await $fetch('/api/article-content', {
+        method: 'POST',
+        body: {
+          url: article.link
+        }
+      })
+      article.scenes = response.scenes
+      article.keywords = response.keywords
+    } catch (e) {
+      console.warn(`Failed to process article ${article.link}:`, e)
+      article.scenes = []
+      article.keywords = []
+    }
+  }
 
   articleList.push(...articles)
 

@@ -13,7 +13,13 @@
       <h3 class="text-xl text-blue-800 font-semibold" :class="isOriginal ? 'original' : ''" v-html="title"></h3>
       <time class="hidden whitespace-nowrap text-sm text-gray-500 md:block">{{ formatTimeStamp(updatedAt) }}</time>
 <!--      <p class="flex-1 text-zinc-400 text-sm pb-4">{{ digest }}</p>-->
-      <p class="text-sm text-gray-500 pb-4">类型: <span>{{formatItemShowType(itemShowType)}}</span></p>
+      <p class="text-sm text-gray-500 pb-2">类型: <span>{{formatItemShowType(itemShowType)}}</span></p>
+      <p v-if="scenes && scenes.length" class="text-sm text-gray-500 pb-2">场景: 
+        <span v-for="scene in scenes" :key="scene" class="inline-block bg-blue-100 text-blue-800 px-2 py-0.5 rounded mr-2">{{scene}}</span>
+      </p>
+      <p v-if="keywords && keywords.length" class="text-sm text-gray-500 pb-4">关键词: 
+        <span v-for="keyword in keywords" :key="keyword" class="inline-block bg-green-100 text-green-800 px-2 py-0.5 rounded mr-2">{{keyword}}</span>
+      </p>
       <ul class="flex flex-wrap space-x-2">
         <li class="text-blue-500 text-sm" v-for="album in albumInfos" :key="album.id">
           <a :href="getAlbumURL(album.id)" target="_blank">#{{album.title}}</a>
@@ -60,6 +66,8 @@ interface Props {
   isOriginal: boolean
   albumInfos: AppMsgAlbumInfo[]
   itemShowType: number
+  scenes?: string[]
+  keywords?: string[]
 }
 
 defineProps<Props>()
