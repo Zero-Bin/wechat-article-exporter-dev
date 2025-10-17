@@ -1,5 +1,6 @@
 import {useKv} from "~/server/utils/kv";  
 import type {AppMsgEx} from "~/types/types";  
+import {processArticleContent} from '~/server/utils/content';
   
 export interface ArticleEntry extends AppMsgEx {  
   fakeid: string  
@@ -17,8 +18,25 @@ export async function saveArticles(fakeid: string, articles: ArticleEntry[]): Pr
     uniqueArticles.set(article.aid, article)  
   }  
     
-  const batchSize = 50  
   const articleArray = Array.from(uniqueArticles.values())  
+    
+  // 处理文章内容，提取关键词和场景
+  for (const article of articleArray) {
+    if ((!article.scenes || article.scenes.length === 0) && (!article.keywords || article.keywords.length === 0) && article.link) {
+      try {
+        const {scenes, keywords} = await processArticleContent(article.link);
+        article.scenes = scenes;
+        article.keywords = keywords;
+      } catch (error) {
+        console.error(`处理文章内容失败: ${article.link}`, error);
+        // 即使处理失败，也要确保字段存在
+        if (!article.scenes) article.scenes = [];
+        if (!article.keywords) article.keywords = [];
+      }
+    }
+  }
+  
+  const batchSize = 50  
     
   for (let i = 0; i < articleArray.length; i += batchSize) {  
     const batch = articleArray.slice(i, i + batchSize)  
@@ -72,4 +90,3 @@ export async function updateArticleStats(fakeid: string, count: number, complete
   const res = await kv.set(["article_stats", fakeid], {count, completed})  
   return !!res.ok  
 }
-
