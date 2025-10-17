@@ -130,8 +130,6 @@ export interface AppMsgAlbumInfo {
 }
 
 export interface AppMsgEx {
-    scenes?: string[]
-    keywords?: string[]
     aid: string
     album_id: string
     appmsg_album_infos: AppMsgAlbumInfo[]

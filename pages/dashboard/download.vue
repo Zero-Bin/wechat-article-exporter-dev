@@ -106,8 +106,6 @@
               <th>作者</th>
               <th class="w-24">是否原创</th>
               <th class="w-36">所属合集</th>
-              <th class="w-24">场景</th>
-              <th class="w-24">关键词</th>
               <th class="w-12">原文</th>
             </tr>
             </thead>
@@ -127,18 +125,6 @@
                   <span v-for="album in article.appmsg_album_infos" :key="album.id"
                         class="text-blue-600 mr-2">#{{ album.title }}</span>
                 </p>
-              </td>
-              <td class="text-center">
-                <span v-if="article.scenes && article.scenes.length">
-                  <span v-for="scene in article.scenes" :key="scene" class="inline-block bg-blue-100 text-blue-800 px-2 py-0.5 rounded mr-2">{{scene}}</span>
-                </span>
-                <span v-else>--</span>
-              </td>
-              <td class="text-center">
-                <span v-if="article.keywords && article.keywords.length">
-                  <span v-for="keyword in article.keywords" :key="keyword" class="inline-block bg-green-100 text-green-800 px-2 py-0.5 rounded mr-2">{{keyword}}</span>
-                </span>
-                <span v-else>--</span>
               </td>
               <td class="text-center">
                 <a class="text-blue-500 underline" :href="article.link" target="_blank">
@@ -254,43 +240,19 @@ async function refreshArticles(info: Info) {
     const serverArticles: AppMsgEx[] = await $fetch(`/api/articles/${fakeid}?limit=10000`) || []  
     console.log('从云端加载了', serverArticles.length, '篇文章')  
   
-    // 调用/article-content API处理文章内容  
-    const articlesWithContent = await Promise.all(serverArticles.map(async (article) => {  
-      try {  
-        const content = await $fetch('/api/article-content', {  
-          method: 'POST',  
-          body: {  
-            url: article.link  
-          }  
-        })  
-        return {  
-          ...article,  
-          scenes: content.scenes,  
-          keywords: content.keywords  
-        }  
-      } catch (error) {  
-        console.error('获取文章内容失败:', error)  
-        return {  
-          ...article,  
-          scenes: [],  
-          keywords: []  
-        }  
-      }  
-    }))  
-  
-    if (articlesWithContent.length > 0) {  
+    if (serverArticles.length > 0) {  
       // 获取本地已有的文章ID  
       const localArticles = await getArticleCache(fakeid, Date.now())  
       const localArticleIds = new Set<string>()  
       localArticles.forEach(article => localArticleIds.add(article.aid))  
   
       // 筛选出云端有但本地没有的文章  
-      const articlesToPut = articlesWithContent.filter(article => !localArticleIds.has(article.aid))  
+      const articlesToPut = serverArticles.filter(article => !localArticleIds.has(article.aid))  
       console.log('将新增到本地', articlesToPut.length, '篇文章')  
   
       // 更新 IndexedDB  
       const accountInfo = cachedAccountInfos.find(info => info.fakeid === fakeid)  
-      const needsInfoUpdate = accountInfo && accountInfo.articles !== articlesWithContent.length  
+      const needsInfoUpdate = accountInfo && accountInfo.articles !== serverArticles.length  
   
       if (articlesToPut.length > 0 || needsInfoUpdate) {  
         const db = await openDatabase()  
@@ -318,7 +280,7 @@ async function refreshArticles(info: Info) {
           if (needsInfoUpdate && accountInfo) {  
             const newInfo = {  
               ...accountInfo,  
-              articles: articlesWithContent.length  
+              articles: serverArticles.length  
             }  
             infoStore.put(newInfo)  
           }  
@@ -328,8 +290,8 @@ async function refreshArticles(info: Info) {
       // 如果当前选中的是这个公众号,更新显示  
       if (selectedAccount.value === fakeid) {  
         articles.length = 0  
-        deletedArticlesCount.value = articlesWithContent.filter(article => article.is_deleted).length  
-        const sortedServerArticles = articlesWithContent.filter(article => !article.is_deleted)  
+        deletedArticlesCount.value = serverArticles.filter(article => article.is_deleted).length  
+        const sortedServerArticles = serverArticles.filter(article => !article.is_deleted)  
           .sort((a, b) => b.update_time - a.update_time)  
   
         articles.push(...sortedServerArticles.map(article => ({  
@@ -350,8 +312,8 @@ async function refreshArticles(info: Info) {
       toast.add({
         title: '刷新成功',
         description: shouldRefreshFromWechat 
-          ? `[${selectedAccountName.value}]: 从微信接口刷新并加载了 ${articlesWithContent.length} 篇文章` 
-          : `[${selectedAccountName.value}]: 从云端缓存加载了 ${articlesWithContent.length} 篇文章`,
+          ? `[${selectedAccountName.value}]: 从微信接口刷新并加载了 ${serverArticles.length} 篇文章` 
+          : `[${selectedAccountName.value}]: 从云端缓存加载了 ${serverArticles.length} 篇文章`,
         color: 'green',
         timeout: 5000 // 显示5秒
       })
